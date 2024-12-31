@@ -1,0 +1,71 @@
+---
+- name: F5 Guest Upgrade - Create Upgrade Groups
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: f5_guest_upgrade.yml | f5 Guest Role
+      when: f5_play_action != "guest_upgrade"
+      ansible.builtin.include_role:
+        name: f5_guest_upgrade
+
+    - name: F5 Guest Upgrade Block
+      when: (f5_play_action == "guest_upgrade") or 
+            (f5_play_action == "guest_sync_status_remediation")
+      block:
+        - name: f5_guest_upgrade.yml | Run Initial BigIP Fact Gathering
+          ansible.builtin.include_role:
+            name: f5_guest_upgrade
+            tasks_from: guest_bigip_fact_gather.yml
+
+        - name: f5_guest_upgrade.yml | Separate hosts into upgrade groups
+          run_once: true
+          loop: "{{ ansible_play_batch }}"
+          loop_control:
+            loop_var: inv_hostname
+          vars:
+            __loop_failover_state: "{{ hostvars[inv_hostname]['__f5_guest_failover_state'] }}"
+          ansible.builtin.set_fact:
+            __f5_guest_upgrade_standby_group: >-
+              {% if __loop_failover_state == "standby" %}{{ __f5_guest_upgrade_standby_group|default([]) + [inv_hostname] }}
+              {%- else %}{{ __f5_guest_upgrade_standby_group|default([]) }}
+              {%- endif %}
+            __f5_guest_upgrade_active_group: >-
+              {% if __loop_failover_state == "active" %}{{ __f5_guest_upgrade_active_group|default([]) + [inv_hostname] }}
+              {%- else %}{{ __f5_guest_upgrade_active_group|default([]) }}
+              {%- endif %}
+
+        # Used to debug active standby groups, will only display if job is executed when verbosity is >= 1
+        - name: f5_guest_upgrade.yml | Debug Standby and Active Groups
+          run_once: true
+          ansible.builtin.debug:
+            verbosity: 1
+            msg:
+              - "STANDBY GROUP = {{ __f5_guest_upgrade_standby_group }}"
+              - "ACTIVE GROUP = {{ __f5_guest_upgrade_active_group }}"
+
+## EXECUTES ON GUESTS IN STANDBY FIRST
+- name: f5_guest_upgrade.yml | F5 Guest Upgrade For Guests in Standby Group
+  hosts: all
+  # strategy: free ## Commented out for initial testing
+  gather_facts: false
+  tasks:
+    - name: f5_guest_upgrade.yml | F5 Guest Upgrade Role
+      when:
+        - (f5_play_action == "guest_upgrade") or (f5_play_action == "guest_sync_status_remediation")
+        - inventory_hostname in __f5_guest_upgrade_standby_group
+      ansible.builtin.include_role:
+        name: f5_guest_upgrade
+
+
+## ONLY RUNS AFTER ALL HOSTS IN STANDBY GROUP HAVE COMPLETED THEIR TASKS FROM PREVIOUS PLAY
+- name: f5_guest_upgrade.yml | F5 Guest Upgrade For Guests in Active Group
+  hosts: all
+  # strategy: free ## Commented out for initial testing
+  gather_facts: false
+  tasks:
+    - name: f5_guest_upgrade.yml | F5 Guest Upgrade Role
+      when: 
+        - (f5_play_action == "guest_upgrade") or (f5_play_action == "guest_sync_status_remediation")
+        - inventory_hostname in __f5_guest_upgrade_active_group
+      ansible.builtin.include_role:
+        name: f5_guest_upgrade
