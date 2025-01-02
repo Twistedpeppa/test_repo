@@ -1,0 +1,79 @@
+---
+- name: guest_sync_status.yml | Validate current sync status of host
+  ansible.builtin.include_tasks: guest_bigip_fact_gather.yml
+
+- name: guest_sync_status.yml | Sync Status Message
+  vars:
+    sync_color_msg: >-
+      {% if __f5_guest_sync_status["color"]|lower == "green" %}
+        Sync Status is GREEN: Continuing...
+      {%- elif __f5_guest_sync_status["color"]|lower == "yellow" %}
+        Sync Status is YELLOW: Will Attempt to Remediate.  Message Details: {{ __f5_guest_sync_status["details"] }}
+      {%- elif __f5_guest_sync_status["color"]|lower == "red" %}
+        Sync Status is RED: Manual Resolution is needed before Upgrade can be performed.
+      {%- endif %}
+  failed_when: __f5_guest_sync_status['color']|lower == "red"
+  ansible.builtin.debug:
+    msg: "{{ sync_color_msg }}"
+
+- name: Sync Status Remediation Block
+  when: (__f5_guest_sync_status['color']|lower == "yellow" )
+  block:
+    - name: guest_sync_status.yml | Filter data from Sync Recommended Action
+      vars:
+        __sync_from_guest_list: "{{ __f5_guest_sync_status['details'] | regex_search('Synchronize (.*?) to group', '\\1') }}"
+        __sync_group_list: "{{ __f5_guest_sync_status['details'] | regex_search('to group (.*?)(,| \\()', '\\1') | regex_replace(\"'\", '') }}"
+      ansible.builtin.set_fact:
+        __sync_from_guest: "{{ __sync_from_guest_list[0] }}"
+        __sync_group: "{{ __sync_group_list[0] }}"
+
+    - name: guest_sync_status.yml | Fail if __sync_from_guest doesn't match the name of a guest in the cluster 
+      when: 
+        - __sync_from_guest != __f5_guest_bigip_hostname
+        - __sync_from_guest not in __f5_guest_sync_failover_devices_list
+      ansible.builtin.fail:
+        msg: "{{ __sync_from_guest }} Doesn't match the name of guest in the cluster, failing sync remediation as a precaution..."
+
+    - name: guest_sync_status.yml | Sync Device Config to Group
+      when: __sync_from_guest == __f5_guest_bigip_hostname
+      vars:
+        ansible_connection: local
+      delegate_to: localhost
+      f5networks.f5_modules.bigip_configsync_action:
+        device_group: "{{ __sync_group }}"
+        provider: "{{ bigip_provider }}"
+        sync_device_to_group: true
+
+    - name: guest_sync_status.yml | Sync Group Config to Device
+      when: __sync_from_guest in __f5_guest_sync_failover_devices_list
+      vars:
+        ansible_connection: local
+      delegate_to: localhost
+      f5networks.f5_modules.bigip_configsync_action:
+        device_group: "{{ __sync_group }}"
+        provider: "{{ bigip_provider }}"
+        sync_group_to_device: true
+
+    - name: guest_sync_status.yml | Pause to allow sync status to update 
+      vars:
+        ansible_connection: local 
+      delegate_to: localhost
+      ansible.builtin.wait_for:
+        timeout: 300
+
+    - name: guest_sync_status.yml | Validate sync status after sync attempt
+      ansible.builtin.include_tasks: guest_bigip_fact_gather.yml
+
+    - name: guest_sync_status.yml | Sync Status Message
+      vars:
+        sync_color_msg: >-
+          {% if __f5_guest_sync_status["color"]|lower == "green" %}
+            Sync Status is GREEN: Continuing...
+          {%- elif __f5_guest_sync_status["color"]|lower == "yellow" %}
+            Sync Status is still YELLOW after remediation attempt: Manual intervention may be needed.  Message Details: {{ __f5_guest_sync_status["details"] }}
+          {%- elif __f5_guest_sync_status["color"]|lower == "red" %}
+            Sync Status is RED: Manual Resolution is needed before Upgrade can be performed.
+          {%- endif %}
+      failed_when: __f5_guest_sync_status['color']|lower != "green"
+      ansible.builtin.debug:
+        msg: "{{ sync_color_msg }}"

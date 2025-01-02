@@ -1,0 +1,137 @@
+---
+- name: guest_upgrade_hotfix.yml | Determine If Hotfix is Needed
+  vars:
+    __hotfix_needed_raw: >-
+      {% if __f5_guest_active_major_version is version(f5_guest_version, '>') %}false
+      {%- elif (__f5_guest_active_major_version is version(f5_guest_version, '==')) and (__f5_guest_active_build_version is version(f5_guest_build, '>=')) %}false
+      {%- else %}true
+      {%- endif %}
+  ansible.builtin.set_fact:
+    __hotfix_needed: "{{ __hotfix_needed_raw | bool }}"
+
+- name: guest_upgrade_hotfix.yml | Hotfix No Upgrade Needed Message
+  when: not __hotfix_needed
+  ansible.builtin.debug:
+    msg:
+      - "Guest on Version: {{ __f5_guest_active_major_version }} Build: {{ __f5_guest_active_build_version }}"
+      - "Desired Version: {{ f5_guest_version }} Build: {{ f5_guest_build }}"
+      - "No Upgrade Needed, Skipping..."
+
+- name: Hotfix Upgrade Block
+  when: __hotfix_needed
+  block:
+    - name: guest_upgrade_hotfix.yml | Check if Hotfix or Main Software is on inactive volume
+      vars:
+        __hotfix_on_inactive_raw: >-
+          {% if (__f5_guest_inactive_major_version is version(f5_guest_version, '==')) and (__f5_guest_inactive_build_version is version(f5_guest_build, '==')) %}true
+          {%- else %}false
+          {%- endif %}
+        __software_on_inactive_raw: >-
+          {% if (__f5_guest_inactive_major_version is version(f5_guest_version, '==')) %}true
+          {%- else %}false
+          {%- endif %}
+      ansible.builtin.set_fact:
+        __hotfix_on_inactive: "{{ __hotfix_on_inactive_raw | bool }}"
+        __software_on_inactive: "{{ __software_on_inactive_raw | bool }}"
+
+    - name: guest_upgrade.yml | software staging message
+      vars:
+        __prestage_msg: >-
+          {% if __f5_guest_lowest_inactive_software_volume | length == 0 %}No Inactive Software Volumes Detected.  Please Create an Inactive Software Volume On the F5 Guest Before Proceeding.
+          {%- elif not __hotfix_on_inactive %}Hotfix Image For Version {{ f5_guest_version }} Not Detected on Inactive Volume, Continuing to Software Upload...
+          {%- elif (__hotfix_on_inactive) and (f5_guest_upgrade_reboot) %}Hotfix Image For Version {{ f5_guest_version }} Detected on Inactive Volume {{ __f5_guest_lowest_inactive_software_volume['full_path'] }}, Proceeding to Activate Volume...
+          {%- elif (__hotfix_on_inactive) and (not f5_guest_upgrade_reboot) %}Hotfix Image For Version {{ f5_guest_version }} Detected on Inactive Volume {{ __f5_guest_lowest_inactive_software_volume['full_path'] }}, Nothing Left To Do Since Reboot Not Selected to Activate Volume...
+          {%- endif %}
+      failed_when: __f5_guest_lowest_inactive_software_volume | length == 0
+      ansible.builtin.debug:
+        msg: "{{ __prestage_msg }}"
+
+    - name: HotFix Upgrade After Pre-Check Block
+      when: (not __hotfix_on_inactive) or
+            (__hotfix_on_inactive) and (f5_guest_upgrade_reboot)
+      vars:
+        __volume_full_path: "{{ __f5_guest_lowest_inactive_software_volume['full_path'] }}"
+        __f5_guest_upgrade_volume: "{{ __volume_full_path.split('/')[0] }}"
+        __f5_guest_upgrade_state: '{% if f5_guest_upgrade_reboot %}activated
+                                  {%- else %}installed
+                                  {%- endif %}'
+      block:
+        ### Commented out Due to issue where after first guest in cluster upgrades sync status goes red on cluster due to mismatched versions
+        ### recommended fix would be to have the guest_bipip_fact_gather.yml set facts for active version and build of the "other" guests in the cluster,
+        ### then set a condition in the guest_sync_status_remediation.yml to ignore sync status if the guests arent on the same version,
+        ### this would indicate an upgrade process, and would still allow the sync remediation to work for sync statuses not related to the upgrade process
+        ### For now you can use the F5_Guest_Common_New AWX template and select the sync remediation survey prior to the upgrade process
+        # - name: guest_upgrade_hotfix.yml | Remediate Sync Status if Needed
+        #   ansible.builtin.include_tasks: guest_sync_status_remediation.yml
+
+        - name: guest_upgrade_hotfix.yml | Force to Standby if Needed
+          ansible.builtin.include_tasks: guest_force_to_standby.yml
+
+        - name: Software Not On Inactive Volume Block
+          when: not __software_on_inactive
+          block:
+            - name: guest_upgrade_hotfix.yml | Upload Software Related to HotFix
+              vars:
+                __f5_guest_hostfix_software_needed: true
+              ansible.builtin.include_tasks: guest_upload_iso.yml
+
+            ## Only runs if job template executed in check mode
+            - name: guest_upgrade_hotfix.yml | Check Mode Debug for Main Software Activation
+              when: ansible_check_mode
+              ansible.builtin.debug:
+                msg:
+                  - "Would Set {{ __f5_guest_iso_to_upload }}"
+                  - "To Volume = {{ __f5_guest_upgrade_volume }}"
+                  - "With State = installed"
+
+            - name: guest_upgrade_hotfix.yml | Set to Inactive Volume Message
+              ansible.builtin.debug: msg="Setting {{ __f5_guest_iso_to_upload }} to InActive Volume {{ __f5_guest_upgrade_volume }}"
+
+            - name: guest_upgrade_hotfix.yml | Add Main Software to Inactive Volume
+              vars:
+                ansible_connection: local
+              delegate_to: localhost
+              f5networks.f5_modules.bigip_software_install:
+                image: "{{ __f5_guest_iso_to_upload }}"
+                state: installed
+                volume: "{{ __f5_guest_upgrade_volume }}"
+                provider: "{{ bigip_provider }}"
+
+        - name: Set Hotfix To Inactive Volume Block
+          block:
+            - name: guest_upgrade_hotfix.yml | Upload Hotfix if Needed
+              ansible.builtin.include_tasks: guest_upload_iso.yml
+
+            ## Only runs if job template executed in check mode
+            - name: guest_upgrade_hotfix.yml | Check Mode Debug For Software Activation
+              when: ansible_check_mode
+              ansible.builtin.debug:
+                msg:
+                  - "Would Set {{ __f5_guest_iso_to_upload }}"
+                  - "To Volume = {{ __f5_guest_upgrade_volume }}"
+                  - "With State = Installed"
+                  # - "With State = {{ __f5_guest_upgrade_state }}" ## Setting state to installed or activate does not currently work, hardcoding to installed for now
+
+            - name: guest_upgrade_hotfix.yml | Set Hotfix to Volume Message
+              vars:
+                # __f5_guest_volume_msg: '{% if f5_guest_upgrade_reboot %}Setting {{ __f5_guest_iso_to_upload }} to Volume {{ __f5_guest_upgrade_volume }} and Activating with Reboot...
+                #                         {%- else %}Setting {{ __f5_guest_iso_to_upload }} to Volume {{ __f5_guest_upgrade_volume }}
+                #                         {%- endif %}'
+                __f5_guest_volume_msg: "Setting {{ __f5_guest_iso_to_upload }} to InActive Volume {{ __f5_guest_upgrade_volume }}"
+              ansible.builtin.debug:
+                msg: "{{ __f5_guest_volume_msg }}"
+
+            - name: guest_upgrade_hotfix.yml | Add HotFix to Inactive Volume
+              vars:
+                ansible_connection: local
+              delegate_to: localhost
+              f5networks.f5_modules.bigip_software_install:
+                image: "{{ __f5_guest_iso_to_upload }}"
+                state: installed
+                # state: "{{ __f5_guest_upgrade_state }}" ## Setting state to installed or activate does not currently work, hardcoding to installed for now
+                volume: "{{ __f5_guest_upgrade_volume }}"
+                provider: "{{ bigip_provider }}"
+
+            - name: guest_upgrade_hotfix.yml | Reboot Guest to Activate Block
+              when: f5_guest_upgrade_reboot
+              ansible.builtin.include_tasks: guest_upgrade_activate.yml

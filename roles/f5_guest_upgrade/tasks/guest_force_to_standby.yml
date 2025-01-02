@@ -1,0 +1,46 @@
+---
+- name: guest_force_to_standby.yml | Validate current sync status of host
+  ansible.builtin.include_tasks: guest_bigip_fact_gather.yml
+
+- name: guest_force_to_standby.yml | Guest Force Standby Message
+  vars:
+    __force_standby_msg: >-
+      {% if __f5_guest_failover_state == "standby" %}Guest failover state is standby, skipping force to standby...
+      {%- elif __f5_guest_failover_state == "active" %}Guest failover state is active, proceeding with force to standby...
+      {%- else %}Unknown Failover State, Failing...
+      {%- endif %}
+  changed_when: __f5_guest_failover_state == "active"
+  failed_when:
+    - __f5_guest_failover_state != "active"
+    - __f5_guest_failover_state != "standby"
+  ansible.builtin.debug:
+    msg: "{{ __force_standby_msg }}"
+  
+- name: Force to Standby Block 
+  when: __f5_guest_failover_state == "active"
+  block:
+    - name: guest_force_to_standby.yml | Force active guest into standby
+      no_log: true
+      vars:
+        ansible_connection: local
+      delegate_to: localhost
+      ansible.builtin.uri:
+        url: 'https://{{ inventory_hostname }}/mgmt/tm/sys/failover'
+        method: POST 
+        user: "{{ lookup('env', 'ANSIBLE_NET_USERNAME') }}"
+        password: "{{ lookup('env', 'ANSIBLE_NET_PASSWORD') }}"
+        body_format: json 
+        body:
+          command: "run"
+          standby: true
+        status_code: 200
+        validate_certs: false
+      register: force_standby_result
+
+    - name: guest_force_to_standby.yml | Gather BigIP facts to confirm guest failover state 
+      ansible.builtin.include_tasks: guest_bigip_fact_gather.yml
+
+    - name: guest_force_to_standby.yml | Validate failover state before continuing
+      failed_when: __f5_guest_failover_state != "standby"
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} failover state = {{ __f5_guest_failover_state }}"

@@ -1,0 +1,103 @@
+---
+- name: guest_bigip_fact_gather.yml | Gather Guest Info From BigIP
+  vars:
+    ansible_connection: local
+  delegate_to: localhost
+  f5networks.f5_modules.bigip_device_info:
+    provider: "{{ bigip_provider }}"
+    data_increment: 2000
+    gather_subset:
+      - device-groups
+      - devices
+      - vcmp-guests
+      - software-volumes
+      - software-images
+      - software-hotfixes
+      - system-info
+      - sync-status
+  register: result_bigip_fact_gather
+  ignore_errors: false
+
+- name: guest_bigip_fact_gather.yml | Set Facts Based on Info Gathered From BigIP
+  vars:
+    __bigip_device_facts: >-
+      {{
+        result_bigip_fact_gather['devices']
+        | selectattr('self', 'equalto', 'yes')
+        | first
+      }}
+    __bigip_device_groups_sync_failover: >-
+      {{
+        result_bigip_fact_gather['device_groups']
+        | selectattr('type', 'equalto', 'sync-failover')
+        | first
+      }}
+    __bigip_software_images: "{{ result_bigip_fact_gather['software_images'] }}"
+    __bigip_software_hotfixes: "{{ result_bigip_fact_gather['software_hotfixes'] }}"
+    __bigip_software_volumes: "{{ result_bigip_fact_gather['software_volumes'] }}"
+    __bigip_lowest_inactive_software_volume: >-
+      {{
+        (__bigip_software_volumes|default([]))
+        | selectattr('active', 'equalto', 'no')
+        | sort(attribute='version', reverse=false)
+        | first
+        | default({})
+      }}
+    __bigip_sync_status: "{{ result_bigip_fact_gather['sync_status'] }}"
+  ansible.builtin.set_fact:
+    __f5_guest_failover_state: "{{ __bigip_device_facts['failover_state'] }}"
+    __f5_guest_active_major_version: "{{ __bigip_device_facts['software_version'] }}"
+    __f5_guest_active_build_version: "{{ __bigip_device_facts['build'] }}"
+    __f5_guest_inactive_major_version: "{{ __bigip_lowest_inactive_software_volume['version']|default('NA') }}"
+    __f5_guest_inactive_build_version: "{{ __bigip_lowest_inactive_software_volume['build']|default('NA') }}"
+    __f5_guest_bigip_hostname: "{{ __bigip_device_facts['hostname'] }}"
+    __f5_guest_chassis_type: "{{ __bigip_device_facts['chassis_type'] }}"
+    __f5_guest_chassis_id: "{{ __bigip_device_facts['chassis_id'] }}"
+    __f5_guest_platform_id: "{{ __bigip_device_facts['platform_id'] }}"
+    __f5_guest_sync_failover_enabled: "{{ __bigip_device_groups_sync_failover['network_failover_enabled'] | bool }}"
+    __f5_guest_sync_failover_name: "{{ __bigip_device_groups_sync_failover['name'] }}"
+    __f5_guest_sync_status: "{{ __bigip_sync_status[0] }}"
+    __f5_guest_software_image_list: "{{ __bigip_software_images }}"
+    __f5_guest_software_image_version_list: "{{ __bigip_software_images | map(attribute='version') | list }}"
+    __f5_guest_software_hotfix_list: "{{ __bigip_software_hotfixes }}"
+    __f5_guest_software_hotfix_version_list: "{{ __bigip_software_hotfixes | map(attribute='version') | list  }}"
+    __f5_guest_software_hotfix_name_list: >-
+      {{
+        (__bigip_software_hotfixes 
+        | map(attribute='name')
+        | map('regex_replace', '/[0-9]+$', '')
+        | list)
+      }}
+    __f5_guest_software_name_list: >-
+      {{ 
+        (__bigip_software_images 
+        | map(attribute='name') 
+        | map('regex_replace', '/[0-9]+$', '')
+        | list)
+      }}
+    __f5_guest_software_combined_name_list: >-
+      {{ 
+        (__bigip_software_images 
+        | map(attribute='name') 
+        | map('regex_replace', '/[0-9]+$', '')
+        | list)
+        +
+        (__bigip_software_hotfixes 
+        | map(attribute='name')
+        | map('regex_replace', '/[0-9]+$', '')
+        | list)
+      }}
+    __f5_guest_software_volumes: "{{ __bigip_software_volumes }}"
+    __f5_guest_active_software_volume: >-
+      {{ __bigip_software_volumes 
+        | selectattr('active', 'equalto', 'yes') 
+      }}
+    __f5_guest_lowest_inactive_software_volume: "{{ __bigip_lowest_inactive_software_volume }}"
+    __f5_guest_sync_failover_devices_list: >-
+      {{
+        __bigip_device_groups_sync_failover['devices']
+        | map('split', '/')
+        | map('last')
+        | reject('equalto', orion_SysName)
+        | list
+      }}

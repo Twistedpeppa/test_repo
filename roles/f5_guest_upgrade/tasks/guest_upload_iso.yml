@@ -1,0 +1,75 @@
+---
+## Update Guest Facts
+- name: guest_upload_iso.yml | Validate current sync status of host
+  ansible.builtin.include_tasks: guest_bigip_fact_gather.yml
+
+## Block Used to Uplaod Main Software Version If Needed and Upgrade is a Hotfix
+- name: Need Main Software for Hotfix Block 
+  when: 
+    - __f5_guest_hostfix_software_needed is defined
+    - __f5_guest_hostfix_software_needed
+  block:
+    - name: guest_upload_iso.yml | Check if software iso related to hotfix is already uploaded
+      ansible.builtin.set_fact: 
+        __software_on_guest: "{{ (__f5_guest_software_name_list | select('search', f5_guest_version) | list | first) | default('no_match') }}"
+
+    - name: guest_upload_iso.yml | Set Main Software ISO Name 
+      when: __software_on_guest != "no_match"
+      ansible.builtin.set_fact:
+        __software_f5_guest_iso: "{{ __software_on_guest }}"
+
+    - name: Check if Main Software is Available in Staging Directory Block 
+      when: __software_on_guest == "no_match"
+      block:
+        - name: guest_upload_iso.yml | If Software not on guest check if available in staging directory
+          vars:
+            ansible_connection: local 
+          delegate_to: localhost 
+          ansible.builtin.find:
+            paths: "{{ software_directory }}"
+            patterns: "BIGIP-{{ f5_guest_version }}-*.iso"
+          register: software_find_result
+
+        - name: guest_upload_iso.yml | Set Main Software ISO Name
+          when: software_find_result.files | length > 0
+          ansible.builtin.set_fact:
+            __software_f5_guest_iso: "{{ software_find_result.files[0].path | split('/') | last }}"
+
+        - name: guest_upload_iso.yml | Output discovered main software iso to be uploaded 
+          when: software_find_result.files | length > 0
+          ansible.builtin.debug: msg="Found Main Software ISO {{ software_directory }}/{{ __software_f5_guest_iso }}"
+
+        - name: guest_upload_iso.yml | Upload Software Message 
+          when: software_find_result.files | length == 0
+          ansible.builtin.fail:
+            msg: "Software ISO related to Hotfix Not Found in {{ software_directory }}, Please Download ISO to the Staging Directory and Try Again..."
+
+## Upload Software to Guest
+- name: guest_upload_iso.yml | Setting ISO to Upload Name 
+  ansible.builtin.set_fact: 
+    __f5_guest_iso_to_upload: >-
+      {% if (__f5_guest_hostfix_software_needed is defined) and (__f5_guest_hostfix_software_needed) %}{{ __software_f5_guest_iso }}
+      {%- else %}{{ f5_guest_iso }}
+      {%- endif %}
+
+- name: guest_upload_iso.yml | software upload message
+  vars:
+    __software_upload_msg: >-
+      {%- if __f5_guest_iso_to_upload not in __f5_guest_software_combined_name_list %}Software Image {{ __f5_guest_iso_to_upload }} Not Detected on Guest, Starting Software Upload...
+      {%- elif __f5_guest_iso_to_upload in __f5_guest_software_combined_name_list %}Software Image {{ __f5_guest_iso_to_upload }} Detected on Guest, Skipping Software Upload...
+      {%- else %}NA
+      {%- endif %}
+  changed_when: __f5_guest_iso_to_upload not in __f5_guest_software_combined_name_list
+  ansible.builtin.debug:
+    msg: "{{ __software_upload_msg }}"
+
+- name: guest_upload_iso.yml | Upload {{ __f5_guest_iso_to_upload }} to Guest
+  vars:
+    ansible_connection: local
+  delegate_to: localhost
+  when: __f5_guest_iso_to_upload not in __f5_guest_software_combined_name_list
+  f5networks.f5_modules.bigip_software_image:
+    image: "{{ software_directory }}/{{ __f5_guest_iso_to_upload }}"
+    provider: "{{ bigip_provider }}"
+    force: false
+  register: iso_upload_result

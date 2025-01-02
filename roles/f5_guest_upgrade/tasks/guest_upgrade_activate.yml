@@ -1,0 +1,56 @@
+---
+- name: guest_upgrade_activate.yml | Guest Reboot Message 
+  ansible.builtin.debug: msg="Rebooting Guest and Setting Active Volume to {{ __f5_guest_upgrade_volume }}"
+
+- name: guest_upgrade_activate.yml | Issue Reboot Command and Specify Volume to Activate
+  no_log: true
+  vars:
+    ansible_connection: local
+  delegate_to: localhost
+  ansible.builtin.uri:
+    url: 'https://{{ inventory_hostname }}/mgmt/tm/sys'
+    method: POST 
+    user: "{{ lookup('env', 'ANSIBLE_NET_USERNAME') }}"
+    password: "{{ lookup('env', 'ANSIBLE_NET_PASSWORD') }}"
+    body_format: json 
+    body:
+      command: "reboot"
+      volume: "{{ __f5_guest_upgrade_volume }}"
+    status_code: 200
+    validate_certs: false
+  register: f5_guest_reboot
+
+- name: guest_upgrade_activate.yml | Pause to Allow Guest to Enter Reboot State Before Continuing 
+  delegate_to: localhost
+  ansible.builtin.wait_for:
+    timeout: 120
+
+- name: guest_upgrade_activate.yml | Wait For Guest Msg 
+  ansible.builtin.debug: msg="Waiting for Guest to finish reboot and enter ready state"
+  
+- name: guest_upgrade_activate.yml | Wait For Guest To Enter Ready State
+  vars:
+    ansible_connection: local
+  delegate_to: localhost
+  f5networks.f5_modules.bigip_wait:
+    provider: "{{ bigip_provider }}"
+    timeout: 3600
+
+- name: guest_upgrade_activate.yml | Gather Updated Device Facts
+  ansible.builtin.include_tasks: guest_bigip_fact_gather.yml
+
+- name: guest_upgrade_activate.yml | Upgrade Validation 
+  vars:
+    __upgrade_validation_raw: '{% if (__f5_guest_active_major_version == f5_guest_version) and (__f5_guest_active_build_version == f5_guest_build) %}true
+                                    {%- else %}false
+                                    {%- endif %}'
+    __upgrade_validation_success: "{{ __upgrade_validation_raw | bool }}"
+    __upgrade_result_msg: '{% if __upgrade_validation_success %}Upgrade Attempt Was Successful!
+                            {%- else %}Upgrade Attempt Failed!
+                            {%- endif %}'
+  failed_when: not __upgrade_validation_success
+  ansible.builtin.debug:
+    msg:
+      - "{{ __upgrade_result_msg }}"
+      - "Active Software Version = {{ __f5_guest_active_major_version }}, Build = {{ __f5_guest_active_build_version }}"
+      - "Desired Software Version = {{ f5_guest_version }}, Build = {{ f5_guest_build }}"
