@@ -1,0 +1,35 @@
+---
+f5_play_action: "guest_bigip_fact_gather"
+f5_guest_upgrade_reboot: "{{ f5_guest_upgrade_reboot_survey | bool }}"
+
+f5_guest_hotfix: "{{ f5_guest_iso is match('^Hotfix-') }}"
+f5_guest_version: "{{ f5_guest_iso | regex_search('(\\d+\\.\\d+\\.\\d+\\.\\d+)') }}"
+f5_guest_build: "{{
+    (f5_guest_hotfix | ternary(
+      f5_guest_iso | regex_replace('^Hotfix-BIGIP-(\\d+\\.\\d+\\.\\d+\\.\\d+)\\.(\\d+\\.\\d+\\.\\d+).*\\.iso','\\2'),
+      f5_guest_iso | regex_replace('^BIGIP-(\\d+\\.\\d+\\.\\d+\\.\\d+)-(\\d+\\.\\d+\\.\\d+).*\\.iso','\\2')
+      )
+    )
+  }}"
+
+stage_dir: "{{ lookup('env', 'AWX_STAGE_DIR') }}"
+software_directory: "{{ stage_dir }}/network/bigip"
+
+bigip_provider:
+  # server: "{{ inventory_hostname }}"
+  server: "{{ orion_DNS }}"
+  user: "{{ lookup('env', 'ANSIBLE_NET_USERNAME') }}"
+  password: "{{ lookup('env', 'ANSIBLE_NET_PASSWORD') }}"
+  validate_certs: false
+  timeout: "4000"
+  server_port: 443
+  no_f5_teem: true
+
+ro_username: 'ansible_ro'
+ro_user_password: "{{ vault_ro_user_password }}"
+
+rw_username: 'ansible_rw'
+rw_user_password: "{{ vault_rw_user_password }}"
+rw_ssh_key: "{{ vault_rw_ssh_key }}"
+
+data_increment: 2000
