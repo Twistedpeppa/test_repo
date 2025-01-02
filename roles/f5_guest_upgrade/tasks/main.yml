@@ -1,0 +1,43 @@
+---
+- name: main.yml | Execute F5 {{ f5_play_action }}
+  when: f5_play_action == "guest_bigip_fact_gather"
+  ansible.builtin.include_tasks: guest_bigip_fact_gather.yml
+
+- name: main.yml | Execute F5 {{ f5_play_action }}
+  when: f5_play_action == "guest_upload_iso"
+  ansible.builtin.include_tasks: guest_upload_iso.yml
+
+- name: main.yml | Execute F5 {{ f5_play_action }}
+  when: f5_play_action == "guest_sync_status_remediation"
+  ansible.builtin.include_tasks: guest_sync_status_remediation.yml
+
+- name: main.yml | Execute F5 {{ f5_play_action }}
+  when: f5_play_action == "guest_force_to_standby"
+  ansible.builtin.include_tasks: guest_force_to_standby.yml
+
+- name: main.yml | F5 Guest Upgrade Process
+  when: f5_play_action == "guest_upgrade"
+  block:
+    # - name: main.yml |  Validation step to ensure other guests in cluster are not in ansible_play_batch
+    #   when: ansible_play_batch | select("search", other_guests_in_cluster) | list | length > 0
+    #   ansible.builtin.fail:
+    #     msg: "More than one Guest from same cluster is in Ansible Inventory Group.  Failing Play...."
+    #   loop: "{{ __f5_guest_sync_failover_devices_list }}"
+    #   loop_control:
+    #     loop_var: other_guests_in_cluster
+
+    - name: main.yml |  Validation step to ensure other guests in cluster are not in ansible_play_batch
+      vars:
+        __device_shortname: "{{ item.split('.')[0] }}"
+      when: ansible_play_batch | select('in', __device_shortname) | list | length > 0
+      ansible.builtin.fail:
+        msg: "Guest Cluster Device {{ __device_shortname }} Also Active in Play, Failing...."
+      loop: "{{ __f5_guest_sync_failover_devices_list }}"
+      
+    - name: main.yml | Execute F5 {{ f5_play_action }}
+      when: not f5_guest_hotfix
+      ansible.builtin.include_tasks: guest_upgrade.yml
+
+    - name: main.yml | Execute F5 {{ f5_play_action }}
+      when: f5_guest_hotfix
+      ansible.builtin.include_tasks: guest_upgrade_hotfix.yml
